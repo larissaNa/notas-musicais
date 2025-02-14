@@ -23,6 +23,14 @@ float estimate_frequency(uint16_t *buffer, uint samples);
 void tocarNotaDuracao(int frequency, int duracao);
 void tocarSomAcerto();
 void tocarSomErro();
+// Protótipo da função para exibir mensagens no display
+void exibirMensagem(const char *mensagem);
+
+//
+// Variáveis globais para o display OLED
+//
+struct render_area frame_area;
+uint8_t ssd[1024]; // Ajuste este tamanho conforme o buffer definido em ssd1306.h
 
 #define BUZZER_PIN 21
 #define LED_RED 13
@@ -38,10 +46,11 @@ const uint I2C_SCL = 15;
 
 // Parâmetros e macros do ADC.
 #define ADC_CLOCK_DIV 96.f
-#define SAMPLES 200                   // Número de amostras do ADC.
+#define SAMPLES 2048             // Número de amostras do ADC.
 #define ADC_ADJUST(x) (x * 3.3f / (1 << 12u) - 1.65f) 
 #define ADC_MAX 3.3f
 #define ADC_STEP (3.3f/5.f)
+#define TOLERANCIA 50
 
 // Taxa de amostragem (em Hz) para estimar a frequência.
 #define SAMPLE_RATE 10000.0f
@@ -109,39 +118,50 @@ void tocarSomErro() {
 }
 
 void definirNotaMusical() {
+    char mensagem[50];
     switch (contador) {
         case 0:
-            printf("Nota Dó selecionada! Frequência: 262 Hz\n");
+            sprintf(mensagem, "Nota Do selecionada! Freq: 262 Hz");
+            printf("%s\n", mensagem);
             frequency = notas[0];
             break;
         case 1:
-            printf("Nota Ré selecionada! Frequência: 294 Hz\n");
+            sprintf(mensagem, "Nota Re selecionada! Freq: 294 Hz");
+            printf("%s\n", mensagem);
             frequency = notas[1];
             break;
         case 2:
-            printf("Nota Mi selecionada! Frequência: 330 Hz\n");
+            sprintf(mensagem, "Nota Mi selecionada! Freq: 330 Hz");
+            printf("%s\n", mensagem);
             frequency = notas[2];
             break;
         case 3:
-            printf("Nota Fá selecionada! Frequência: 349 Hz\n");
+            sprintf(mensagem, "Nota Fa selecionada! Freq: 349 Hz");
+            printf("%s\n", mensagem);
             frequency = notas[3];
             break;
         case 4:
-            printf("Nota Sol selecionada! Frequência: 392 Hz\n");
+            sprintf(mensagem, "Nota Sol selecionada! Freq: 392 Hz");
+            printf("%s\n", mensagem);
             frequency = notas[4];
             break;
         case 5:
-            printf("Nota Lá selecionada! Frequência: 440 Hz\n");
+            sprintf(mensagem, "Nota La selecionada! Freq: 440 Hz");
+            printf("%s\n", mensagem);
             frequency = notas[5];
             break;
         case 6:
-            printf("Nota Si selecionada! Frequência: 494 Hz\n");
+            sprintf(mensagem, "Nota Si selecionada! Freq: 494 Hz");
+            printf("%s\n", mensagem);
             frequency = notas[6];
             break;
         default:
             frequency = 0;
-            break;
+            return;
     }
+    // Exibe a mensagem no display OLED
+    exibirMensagem(mensagem);
+    // Toca a nota
     tocarNota(frequency);
 }
 
@@ -178,29 +198,69 @@ void sample_mic() {
     adc_fifo_drain();
     adc_run(false);
     dma_channel_configure(dma_channel, &dma_cfg,
-      adc_buffer,
-      &adc_hw->fifo,
-      SAMPLES,
-      true
+        adc_buffer,
+        &adc_hw->fifo,
+        SAMPLES,
+        true
     );
     adc_run(true);
     dma_channel_wait_for_finish_blocking(dma_channel);
     adc_run(false);
 }
 
+/*
+ * Função de estimação de frequência utilizando autocorrelação com janela de Hamming.
+ */
 float estimate_frequency(uint16_t *buffer, uint samples) {
-    int zero_crossings = 0;
-    int mid = 2048; // Valor médio para um ADC de 12 bits (0 a 4095)
-    for (int i = 1; i < samples; i++) {
-        if ((buffer[i-1] < mid && buffer[i] >= mid) ||
-            (buffer[i-1] > mid && buffer[i] <= mid)) {
-            zero_crossings++;
+    float data[samples];
+
+    // Converter os valores ADC para float
+    for (int i = 0; i < samples; i++) {
+        data[i] = (float) buffer[i];
+    }
+    // Remover o offset DC: calcular a média e subtrair
+    float mean = 0;
+    for (int i = 0; i < samples; i++) {
+        mean += data[i];
+    }
+    mean /= samples;
+    for (int i = 0; i < samples; i++) {
+        data[i] -= mean;
+    }
+    // Aplicar janela de Hamming
+    for (int i = 0; i < samples; i++) {
+        float w = 0.54 - 0.46 * cos(2.0 * M_PI * i / (samples - 1));
+        data[i] *= w;
+    }
+    // Autocorrelação
+    int lag_max = samples / 2;
+    float best_corr = 0.0;
+    int best_lag = 0;
+    // Iniciar a partir de um lag mínimo (por exemplo, 20) para evitar ruídos e picos espúrios
+    for (int lag = 20; lag < lag_max; lag++) {
+        float sum = 0.0;
+        for (int i = 0; i < samples - lag; i++) {
+            sum += data[i] * data[i + lag];
+        }
+        if (sum > best_corr) {
+            best_corr = sum;
+            best_lag = lag;
         }
     }
-    float est_freq = ((float)zero_crossings / 2.0f) * (SAMPLE_RATE / SAMPLES);
-    return est_freq;
+    if (best_lag == 0) {
+        return 0.0;
+    }
+    // Calcula a frequência fundamental
+    float fundamental = SAMPLE_RATE / best_lag;
+    return fundamental;
 }
 
+// Função para exibir mensagens no display OLED
+void exibirMensagem(const char *mensagem) {
+    memset(ssd, 0, ssd1306_buffer_length);
+    ssd1306_draw_string(ssd, 0, 0, (char *)mensagem);
+    render_on_display(ssd, &frame_area);
+}
 
 int main() {
     stdio_init_all();
@@ -222,48 +282,36 @@ int main() {
     
     init_microphone();
 
-     // Inicialização do i2c
-     i2c_init(i2c1, ssd1306_i2c_clock * 1000);
-     gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
-     gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
-     gpio_pull_up(I2C_SDA);
-     gpio_pull_up(I2C_SCL);
-    // Processo de inicialização completo do OLED SSD1306
+    // Inicialização do I2C para o OLED
+    i2c_init(i2c1, ssd1306_i2c_clock * 1000);
+    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA);
+    gpio_pull_up(I2C_SCL);
     ssd1306_init();
 
-    // Preparar área de renderização para o display (ssd1306_width pixels por ssd1306_n_pages páginas)
-    struct render_area frame_area = {
-        start_column : 0,
-        end_column : ssd1306_width - 1,
-        start_page : 0,
-        end_page : ssd1306_n_pages - 1
-    };
-
+    // Configuração da área de renderização do display
+    frame_area.start_column = 0;
+    frame_area.end_column = ssd1306_width - 1;
+    frame_area.start_page = 0;
+    frame_area.end_page = ssd1306_n_pages - 1;
     calculate_render_area_buffer_length(&frame_area);
-
-    // zera o display inteiro
-    uint8_t ssd[ssd1306_buffer_length];
     memset(ssd, 0, ssd1306_buffer_length);
     render_on_display(ssd, &frame_area);
 
-restart:
-
-// Parte do código para exibir a mensagem no display (opcional: mudar ssd1306_height para 32 em ssd1306_i2c.h)
-// /**
+    // Exibe mensagem inicial no display
     char *text[] = {
-        "Ola! para",
-        "comecar clique no",
-        "  botao A", 
-};
+        "  Ola clique no!   ",
+        "  botao A   ",
+        "  para comecar  "
+    };
 
     int y = 0;
-    for (uint i = 0; i < count_of(text); i++)
-    {
+    for (uint i = 0; i < (sizeof(text)/sizeof(text[0])); i++) {
         ssd1306_draw_string(ssd, 5, y, text[i]);
         y += 8;
     }
     render_on_display(ssd, &frame_area);
-
 
     while (1) {
         bool notePlayed = false;
@@ -289,17 +337,26 @@ restart:
         if (notePlayed) {
             sleep_ms(3000);
             printf("Ouvindo...\n");
+            exibirMensagem("Ouvindo...");
+            
             sample_mic();
             float captured_freq = estimate_frequency(adc_buffer, SAMPLES);
-            printf("Frequência capturada: %.2f Hz\n", captured_freq);
+            char freqMsg[50];
+            sprintf(freqMsg, "Freq capt: %.2f Hz", captured_freq);
+            printf("%s\n", freqMsg);
+            exibirMensagem(freqMsg);
             
-            if (fabs(captured_freq - frequency) < 5.0) {
+            if (fabs(captured_freq - frequency) <= TOLERANCIA) {
+                sprintf(freqMsg, "Acerto: %d Hz", frequency);
                 printf("Acerto: Som similar a nota selecionada (%d Hz)\n", frequency);
+                exibirMensagem(freqMsg);
                 gpio_put(LED_GREEN, 1);
                 tocarSomAcerto();
                 gpio_put(LED_GREEN, 0);
             } else {
-                printf("Erro: Som não corresponde à nota selecionada (%d Hz)\n", frequency);
+                sprintf(freqMsg, "Erro: %d Hz", frequency);
+                printf("Erro: Som nao corresponde a nota selecionada (%d Hz)\n", frequency);
+                exibirMensagem(freqMsg);
                 gpio_put(LED_RED, 1);
                 tocarSomErro();
                 gpio_put(LED_RED, 0);
